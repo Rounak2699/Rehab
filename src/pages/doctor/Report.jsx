@@ -28,6 +28,13 @@ export default function Report({ selId, setSelId }) {
           {db.patients.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
         {patient.note && <p className="sub" style={{ margin: "10px 0 0" }}>{patient.note}</p>}
+        {(patient.email || patient.phone) && (
+          <p className="sub" style={{ margin: "10px 0 0" }}>
+            {patient.email && <span>Email: {patient.email}</span>}
+            {patient.email && patient.phone && <br />}
+            {patient.phone && <span>Phone: {patient.phone}</span>}
+          </p>
+        )}
       </div>
 
       <div className="stats">

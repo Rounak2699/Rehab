@@ -13,9 +13,12 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r backend\requirements.txt
 $env:REHABREP_TOKEN_SECRET = "replace-this-with-a-long-random-secret"
+$env:REHABREP_DATA_ENCRYPTION_KEY = python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"
 Set-Location backend
 python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Keep `REHABREP_DATA_ENCRYPTION_KEY` in a secrets manager in production, back it up securely, and use the same key after restarts. Losing or changing it makes encrypted patient registration details unreadable. Do not commit either secret to source control.
 
 In a second terminal, start the frontend from the project root:
 
@@ -55,7 +58,7 @@ Demo accounts and prescriptions are created the first time the API starts. The S
 
 - `POST /api/auth/login` — password login, returns a signed bearer token.
 - `GET /api/bootstrap` — role-scoped patient plans and session history.
-- `POST /api/patients` — therapist creates a patient with an initial password.
+- `POST /api/patients` — authenticated doctor registers a linked patient with an initial password and optional contact/recovery details.
 - `POST /api/patients/{id}/exercises` / `DELETE .../{exercise_id}` — manage prescriptions and reminder schedules.
 - `POST /api/sessions` — patient saves a completed or partial session.
 - `GET /api/health` — service health check.
@@ -63,6 +66,8 @@ Demo accounts and prescriptions are created the first time the API starts. The S
 Interactive API documentation is available at `http://localhost:8000/docs`.
 
 ## Pose analysis and privacy
+
+New patient registration details (name, email, phone, and recovery notes) are encrypted in the database using **AES-256-GCM** with a random 96-bit nonce and authenticated associated data. The 32-byte key is Base64-encoded in `REHABREP_DATA_ENCRYPTION_KEY`; the backend fails registration rather than storing new profile details in plaintext if the key is missing or invalid. Existing demo/legacy records are not automatically migrated. Passwords are not encrypted: they are stored as salted **PBKDF2-HMAC-SHA-256** hashes and cannot be recovered from the database.
 
 MediaPipe Pose Landmarker runs in the patient’s browser. It identifies visible body landmarks; the app calculates the prescribed joint angle with JavaScript geometry and counts a rep when the measured angle enters the therapist’s range after movement. A rep is marked correct when its angle is in range and landmark visibility is sufficient. No camera frames are uploaded or saved, and no NumPy is used.
 
@@ -73,6 +78,7 @@ The signed token secret must be set for deployments; if omitted, a random develo
 ## Configuration
 
 - `REHABREP_TOKEN_SECRET` — HMAC signing secret for API tokens.
+- `REHABREP_DATA_ENCRYPTION_KEY` — Base64-encoded 32-byte key for AES-256-GCM encryption of new patient registration details.
 - `REHABREP_DB_PATH` — SQLite file path.
 - `REHABREP_ALLOWED_ORIGINS` — comma-separated API CORS allowlist (defaults to local Vite origins).
 - `VITE_API_URL` — optional API base URL; defaults to the Vite `/api` proxy.

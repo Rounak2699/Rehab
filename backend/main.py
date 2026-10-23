@@ -1,4 +1,5 @@
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -11,6 +12,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -20,6 +23,7 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("REHABREP_DB_PATH", str(BASE_DIR / "rehabrep.db")))
 TOKEN_SECRET = os.getenv("REHABREP_TOKEN_SECRET") or os.urandom(32).hex()
+DATA_ENCRYPTION_KEY = os.getenv("REHABREP_DATA_ENCRYPTION_KEY", "")
 TOKEN_LIFETIME_SECONDS = 60 * 60 * 12
 PASSWORD_ITERATIONS = 310_000
 bearer = HTTPBearer(auto_error=False)
@@ -55,6 +59,58 @@ def hash_password(password, salt=None):
 def password_matches(password, salt, expected_hash):
     _, candidate = hash_password(password, bytes.fromhex(salt))
     return hmac.compare_digest(candidate, expected_hash)
+
+
+def encrypt_registration_data(user_id, registration_data):
+    try:
+        key = base64.b64decode(DATA_ENCRYPTION_KEY, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Patient registration is unavailable: configure a valid REHABREP_DATA_ENCRYPTION_KEY.",
+        ) from exc
+    if len(key) != 32:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Patient registration is unavailable: REHABREP_DATA_ENCRYPTION_KEY must encode 32 bytes.",
+        )
+    nonce = os.urandom(12)
+    associated_data = f"rehabrep:user:{user_id}:registration:v1".encode()
+    plaintext = json.dumps(registration_data, ensure_ascii=False, separators=(",", ":")).encode()
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, associated_data)
+    return base64.b64encode(nonce + ciphertext).decode("ascii")
+
+
+def read_registration_data(row):
+    encrypted_data = row["registration_data"]
+    if not encrypted_data:
+        return {
+            "name": row["name"],
+            "email": "",
+            "phone": "",
+            "note": row["note"],
+        }
+    try:
+        key = base64.b64decode(DATA_ENCRYPTION_KEY, validate=True)
+        payload = base64.b64decode(encrypted_data, validate=True)
+        if len(key) != 32 or len(payload) < 13:
+            raise ValueError("Invalid encryption key or registration payload.")
+        associated_data = f"rehabrep:user:{row['id']}:registration:v1".encode()
+        plaintext = AESGCM(key).decrypt(payload[:12], payload[12:], associated_data)
+        details = json.loads(plaintext)
+    except (binascii.Error, InvalidTag, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Patient registration data is unavailable. Verify REHABREP_DATA_ENCRYPTION_KEY.",
+        ) from exc
+    if not isinstance(details, dict) or not all(
+        isinstance(details.get(field), str) for field in ("name", "email", "phone", "note")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Patient registration data is invalid.",
+        )
+    return details
 
 
 def encode_token(payload):
@@ -94,6 +150,7 @@ def initialize_database():
                 role TEXT NOT NULL CHECK (role IN ('doctor', 'patient')),
                 name TEXT NOT NULL,
                 note TEXT NOT NULL DEFAULT '',
+                registration_data TEXT,
                 doctor_id TEXT REFERENCES users(id),
                 password_salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL
@@ -129,6 +186,11 @@ def initialize_database():
             CREATE INDEX IF NOT EXISTS sessions_patient_date ON sessions(patient_id, date);
             """
         )
+        user_columns = {
+            column["name"] for column in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "registration_data" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN registration_data TEXT")
         exercise_columns = {
             column["name"] for column in connection.execute("PRAGMA table_info(exercises)").fetchall()
         }
@@ -233,6 +295,9 @@ class LoginRequest(BaseModel):
 class PatientCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     password: str = Field(min_length=8, max_length=256)
+    email: str = Field(default="", max_length=254)
+    phone: str = Field(default="", max_length=30)
+    note: str = Field(default="", max_length=2000)
 
 
 class ExerciseCreate(BaseModel):
@@ -265,11 +330,12 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
     claims = decode_token(credentials.credentials)
     with db_connection() as connection:
         user = connection.execute(
-            "SELECT id, role, name, doctor_id FROM users WHERE id = ?", (claims.get("sub"),)
+            "SELECT id, role, name, note, registration_data, doctor_id FROM users WHERE id = ?",
+            (claims.get("sub"),),
         ).fetchone()
     if user is None or user["role"] != claims.get("role"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is unavailable.")
-    return dict(user)
+    return {**dict(user), **read_registration_data(user)}
 
 
 def require_doctor(user=Depends(current_user)):
@@ -294,6 +360,7 @@ def check_patient_access(connection, doctor, patient_id):
 
 
 def read_patient(connection, row):
+    registration = read_registration_data(row)
     plan = connection.execute(
         """SELECT id, type, name, joint, sets, amount, min, max,
                   sessions_per_day, reminder_time
@@ -302,8 +369,7 @@ def read_patient(connection, row):
     ).fetchall()
     return {
         "id": row["id"],
-        "name": row["name"],
-        "note": row["note"],
+        **registration,
         "plan": [
             {
                 "id": exercise["id"],
@@ -347,7 +413,7 @@ def health():
 def login(request: LoginRequest):
     with db_connection() as connection:
         user = connection.execute(
-            """SELECT id, role, name, doctor_id, password_salt, password_hash
+            """SELECT id, role, name, note, registration_data, doctor_id, password_salt, password_hash
                FROM users WHERE id = ? AND role = ?""",
             (request.id.strip().lower(), request.role),
         ).fetchone()
@@ -355,11 +421,15 @@ def login(request: LoginRequest):
         request.password, user["password_salt"], user["password_hash"]
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User ID or password is incorrect.")
+    details = read_registration_data(user)
     now = int(time.time())
     token = encode_token(
         {"sub": user["id"], "role": user["role"], "iat": now, "exp": now + TOKEN_LIFETIME_SECONDS}
     )
-    return {"token": token, "user": {"id": user["id"], "role": user["role"], "name": user["name"]}}
+    return {
+        "token": token,
+        "user": {"id": user["id"], "role": user["role"], "name": details["name"]},
+    }
 
 
 @app.get("/api/bootstrap")
@@ -367,13 +437,16 @@ def bootstrap(user=Depends(current_user)):
     with db_connection() as connection:
         if user["role"] == "doctor":
             patient_rows = connection.execute(
-                "SELECT id, name, note FROM users WHERE role = 'patient' AND doctor_id = ? ORDER BY name",
+                """SELECT id, name, note, registration_data FROM users
+                   WHERE role = 'patient' AND doctor_id = ? ORDER BY name""",
                 (user["id"],),
             ).fetchall()
             patient_ids = [row["id"] for row in patient_rows]
         else:
             patient_rows = connection.execute(
-                "SELECT id, name, note FROM users WHERE id = ? AND role = 'patient'", (user["id"],)
+                """SELECT id, name, note, registration_data FROM users
+                   WHERE id = ? AND role = 'patient'""",
+                (user["id"],),
             ).fetchall()
             patient_ids = [user["id"]]
         patients = [read_patient(connection, patient) for patient in patient_rows]
@@ -390,20 +463,35 @@ def bootstrap(user=Depends(current_user)):
 @app.post("/api/patients", status_code=status.HTTP_201_CREATED)
 def create_patient(request: PatientCreate, doctor=Depends(require_doctor)):
     name = request.name.strip()
-    patient_id = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60]
-    if not patient_id:
+    if len(name) < 2:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Enter a valid patient name.")
+    email = request.email.strip().lower()
+    if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Enter a valid email address.")
+    phone = request.phone.strip()
+    if phone and not re.fullmatch(r"[+0-9().\-\s]{7,30}", phone):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Enter a valid phone number.")
+    patient_id = "p" + uuid4().hex[:16]
+    encrypted_data = encrypt_registration_data(
+        patient_id,
+        {"name": name, "email": email, "phone": phone, "note": request.note.strip()},
+    )
     with db_connection() as connection:
-        existing = connection.execute("SELECT 1 FROM users WHERE id = ?", (patient_id,)).fetchone()
-        if existing:
-            patient_id = f"{patient_id}-{uuid4().hex[:6]}"
         salt, password_hash = hash_password(request.password)
         connection.execute(
-            """INSERT INTO users (id, role, name, doctor_id, password_salt, password_hash)
-               VALUES (?, 'patient', ?, ?, ?, ?)""",
-            (patient_id, name, doctor["id"], salt, password_hash),
+            """INSERT INTO users
+               (id, role, name, note, registration_data, doctor_id, password_salt, password_hash)
+               VALUES (?, 'patient', '', '', ?, ?, ?, ?)""",
+            (patient_id, encrypted_data, doctor["id"], salt, password_hash),
         )
-    return {"id": patient_id, "name": name, "note": "", "plan": []}
+    return {
+        "id": patient_id,
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "note": request.note.strip(),
+        "plan": [],
+    }
 
 
 @app.post("/api/patients/{patient_id}/exercises", status_code=status.HTTP_201_CREATED)

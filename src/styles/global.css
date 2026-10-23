@@ -22,6 +22,7 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--teal);outl
 .chip button{background:none;border:0;color:var(--mute);cursor:pointer;padding:0;font-size:16px;line-height:1}
 .err{color:var(--bad);font-size:13px;margin:10px 0 0}
 .ok{color:var(--ok);font-size:13px;margin:10px 0 0}
+.registration-success{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--chip);font-size:13px;color:var(--ink)}
 .role{display:flex;gap:10px}.role button{flex:1;padding:14px;border-radius:14px;border:1px solid var(--line);background:#fff;color:var(--teal);font-weight:600;cursor:pointer}
 .role button.on{background:var(--teal);color:#fff;box-shadow:0 8px 16px rgba(15,118,110,.25)}
 .pw{position:relative}.pw button{position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--mute);cursor:pointer;font-size:13px}
