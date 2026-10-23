@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 
@@ -582,3 +583,8 @@ def create_session(request: SessionCreate, patient=Depends(require_patient)):
             ),
         )
     return {"id": session_id, "patientId": patient["id"], "exId": exercise["id"], **request.model_dump()}
+
+
+FRONTEND_DIST = BASE_DIR.parent / "dist"
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

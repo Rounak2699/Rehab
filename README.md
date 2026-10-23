@@ -29,6 +29,17 @@ npm run dev
 
 Vite proxies `/api` to `http://localhost:8000`. The camera needs HTTPS or localhost; the MediaPipe pose model and WebAssembly runtime are downloaded by the browser on first use.
 
+## Deploy frontend and API on one Render domain
+
+The included `Dockerfile` builds the Vite frontend and runs it together with the FastAPI backend as one Render Web Service. In Render, create a **Web Service** for this repository, choose **Docker** as the runtime, and use the repository root as the Docker build context. Render will use the root `Dockerfile`; do not create a separate Static Site or set a frontend `VITE_API_URL`. The app will call `/api` on the same domain.
+
+Configure these environment variables in the Render service:
+
+- `REHABREP_TOKEN_SECRET` — a long, random secret for signing API tokens.
+- `REHABREP_DATA_ENCRYPTION_KEY` — a Base64-encoded 32-byte key for patient registration data. Generate one with `python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"` and keep the same value across deployments.
+
+The backend stores its SQLite database inside the container by default. Container files are not durable across redeploys, so attach a persistent disk and set `REHABREP_DB_PATH` to a file on its mount path if you need patient and session data to survive deployments. Back up the encryption key securely; losing it makes encrypted patient registration details unreadable.
+
 ## Install on Android
 
 The Capacitor Android project is in `android\`. The Android app needs the ReHabRep API deployed on a server reachable from your phone over HTTPS; a localhost API or the Vite development proxy is not reachable from an installed app. Make sure your API CORS allowlist includes `https://localhost`, the Capacitor Android app origin.

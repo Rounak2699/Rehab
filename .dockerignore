@@ -1,0 +1,6 @@
+.git
+.venv
+node_modules
+dist
+backend/__pycache__
+backend/rehabrep.db
