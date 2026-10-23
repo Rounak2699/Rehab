@@ -1,0 +1,11 @@
+{
+  "appId": "com.nexusnavigators.rehabrep",
+  "appName": "ReHabRep",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

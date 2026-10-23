@@ -1,0 +1,7 @@
+node_modules
+dist
+.DS_Store
+backend/rehabrep.db
+backend/__pycache__
+.venv
+.env.production
